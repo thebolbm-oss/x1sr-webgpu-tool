@@ -1,1 +1,53 @@
 
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>XLSR AI Upscaler</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+</head>
+<body>
+
+    <div class="glass-container">
+        <div class="header">
+            <div class="logo">✨ XLSR 3x</div>
+            <span class="badge">WebGPU Accelerated</span>
+        </div>
+        
+        <h1>Real-Time AI Upscaler</h1>
+        <p class="subtitle">Enhance your images instantly using WebGPU. 100% private, runs in your browser.</p>
+        
+        <div class="upload-area" id="uploadArea">
+            <input type="file" id="imageInput" accept="image/*">
+            <div class="upload-content">
+                <span class="icon">🖼️</span>
+                <p>Drop your image here or click to browse</p>
+                <small>Supports JPEG, PNG, WEBP</small>
+            </div>
+        </div>
+
+        <div id="status-bar" class="status-idle">📁 Waiting for image...</div>
+
+        <div class="preview-container">
+            <div class="image-box">
+                <div class="box-label">Original</div>
+                <img id="originalImage" src="" alt="Uploaded Image">
+            </div>
+            <div class="arrow">➡️</div>
+            <div class="image-box">
+                <div class="box-label">Upscaled (3x)</div>
+                <div id="canvas-container">
+                    <canvas id="outputCanvas"></canvas>
+                    <div id="loading-spinner" class="spinner-hidden"></div>
+                </div>
+            </div>
+        </div>
+
+        <button id="downloadBtn" class="download-btn" disabled>⬇️ Download Enhanced Image</button>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
