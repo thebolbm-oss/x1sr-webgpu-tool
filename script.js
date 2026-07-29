@@ -1,126 +1,146 @@
-
 let session = null;
 let currentOutputDataURL = null;
 
-// 1. Model Load Function (With WebGPU priority, else WASM/CPU)
+// UI Elements
+const statusBadge = document.getElementById('statusBadge');
+const progressContainer = document.getElementById('progressContainer');
+const progressFill = document.getElementById('progressFill');
+const progressText = document.getElementById('progressText');
+const uploadArea = document.getElementById('uploadArea');
+const imageInput = document.getElementById('imageInput');
+const originalImage = document.getElementById('originalImage');
+const outputCanvas = document.getElementById('outputCanvas');
+const loadingSpinner = document.getElementById('loadingSpinner');
+const downloadBtn = document.getElementById('downloadBtn');
+
+// 1. Update Status Function
+function setStatus(text, type) {
+    statusBadge.innerText = text;
+    statusBadge.className = 'badge-' + type;
+}
+
+// 2. Progress Bar Function (File size ~140KB, so it will be instant)
+function updateProgress(percent, text) {
+    progressContainer.style.display = 'block';
+    progressFill.style.width = percent + '%';
+    progressText.innerText = text;
+    if (percent === 100) {
+        setTimeout(() => { progressContainer.style.display = 'none'; }, 1500);
+    }
+}
+
+// 3. Load Model with Progress Tracking
 async function loadModel() {
-    updateStatus("Loading AI Model... Please wait.", 'loading');
+    setStatus("Downloading Model...", "working");
+    updateProgress(0, "Loading AI...");
+
     try {
         const ort = window.ort;
         ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
 
-        // Try WebGPU first. If fails, fallback to WASM (CPU) automatically.
-        session = await ort.InferenceSession.create('xlsr.onnx', {
-            executionProviders: ['webgpu', 'wasm'] 
-        });
+        // Simulate progress since file is tiny
+        updateProgress(30, "Initializing WebGPU...");
         
-        console.log("Model Loaded successfully on: ", session.executionProvider);
-        updateStatus("✅ Model Ready! Upload an image.", 'idle');
-        document.getElementById('imageInput').disabled = false;
+        // ⚠️ IMPORTANT: Path changed to 'static/xlsr.onnx'
+        session = await ort.InferenceSession.create('static/xlsr.onnx', {
+            executionProviders: ['webgpu', 'wasm']
+        });
+
+        updateProgress(100, "Model Ready!");
+        setStatus("✅ Model Loaded", "ready");
+        imageInput.disabled = false;
+        
     } catch (e) {
-        updateStatus("❌ Error: " + e.message, 'error');
-        console.error(e);
+        updateProgress(0, "Error loading model");
+        setStatus("❌ Error: Check Console", "error");
+        console.error("Load Error:", e);
     }
 }
 
-// 2. UI Status updater
-function updateStatus(message, type) {
-    const bar = document.getElementById('status-bar');
-    bar.innerText = message;
-    bar.className = 'status-' + type;
-}
-
-// 3. Image Upload Handler
-document.getElementById('uploadArea').addEventListener('click', () => {
-    document.getElementById('imageInput').click();
-});
-
-document.getElementById('imageInput').addEventListener('change', async function(e) {
-    if (!session) { alert("Model still loading! Wait a second."); return; }
+// 4. Handle Image Upload
+uploadArea.addEventListener('click', () => imageInput.click());
+imageInput.addEventListener('change', function(e) {
+    if (!session) { alert("Please wait, model is still loading!"); return; }
     const file = e.target.files[0];
     if (!file) return;
 
-    const img = document.getElementById('originalImage');
-    img.src = URL.createObjectURL(file);
-    document.getElementById('downloadBtn').disabled = true;
+    originalImage.src = URL.createObjectURL(file);
+    downloadBtn.disabled = true;
     currentOutputDataURL = null;
+    outputCanvas.getContext('2d').clearRect(0, 0, outputCanvas.width, outputCanvas.height);
 
-    img.onload = async () => {
-        updateStatus("⚡ Upscaling with WebGPU...", 'loading');
-        document.getElementById('loading-spinner').classList.remove('spinner-hidden');
-        await upscaleImage(img);
+    originalImage.onload = async () => {
+        setStatus("🔮 Enhancing Image...", "working");
+        loadingSpinner.classList.remove('hidden');
+        await upscaleImage(originalImage);
     };
 });
 
-// 4. Main Upscaling Logic (Optimized for w8a8 quantized XLSR)
+// 5. AI Upscaling Logic
 async function upscaleImage(img) {
-    const canvas = document.getElementById('outputCanvas');
-    const ctx = canvas.getContext('2d');
-
-    const inputSize = 128; // XLSR 3x requires 128x128 input
+    const ctx = outputCanvas.getContext('2d');
+    const inputSize = 128;
     const scale = 3;
-    const outputSize = inputSize * scale; // 384x384
+    const outputSize = inputSize * scale;
 
-    canvas.width = outputSize;
-    canvas.height = outputSize;
+    outputCanvas.width = outputSize;
+    outputCanvas.height = outputSize;
 
-    // 1. Prepare Input (Resize to 128x128)
+    // Resize to 128x128
     let tempCanvas = document.createElement('canvas');
-    tempCanvas.width = inputSize;
-    tempCanvas.height = inputSize;
+    tempCanvas.width = inputSize; tempCanvas.height = inputSize;
     let tempCtx = tempCanvas.getContext('2d');
     tempCtx.drawImage(img, 0, 0, inputSize, inputSize);
     let imageData = tempCtx.getImageData(0, 0, inputSize, inputSize);
 
-    // 2. Convert to Tensor (Uint8 for w8a8 model)
+    // Convert to Uint8 Tensor (for w8a8 model)
     const { data, width, height } = imageData;
     const dataTensor = new Uint8Array(3 * width * height);
-    
     for (let i = 0; i < width * height; i++) {
-        dataTensor[i] = data[i * 4];                 // R (0-255)
-        dataTensor[i + width * height] = data[i * 4 + 1]; // G
-        dataTensor[i + 2 * width * height] = data[i * 4 + 2]; // B
+        dataTensor[i] = data[i * 4];
+        dataTensor[i + width * height] = data[i * 4 + 1];
+        dataTensor[i + 2 * width * height] = data[i * 4 + 2];
     }
 
     const tensor = new ort.Tensor('uint8', dataTensor, [1, 3, height, width]);
 
-    // 3. Run AI Model
     try {
         const feeds = { input: tensor };
         const results = await session.run(feeds);
         const outputData = results.output.data;
 
-        // 4. Convert Output Tensor to ImageData
+        // Convert output back to Image
         const imageDataOutput = ctx.createImageData(outputSize, outputSize);
         for (let i = 0; i < outputSize * outputSize; i++) {
-            imageDataOutput.data[i * 4] = Math.min(255, outputData[i]);         // R
-            imageDataOutput.data[i * 4 + 1] = Math.min(255, outputData[i + outputSize * outputSize]); // G
-            imageDataOutput.data[i * 4 + 2] = Math.min(255, outputData[i + 2 * outputSize * outputSize]); // B
-            imageDataOutput.data[i * 4 + 3] = 255; // Alpha
+            imageDataOutput.data[i * 4] = Math.min(255, outputData[i]);
+            imageDataOutput.data[i * 4 + 1] = Math.min(255, outputData[i + outputSize * outputSize]);
+            imageDataOutput.data[i * 4 + 2] = Math.min(255, outputData[i + 2 * outputSize * outputSize]);
+            imageDataOutput.data[i * 4 + 3] = 255;
         }
         ctx.putImageData(imageDataOutput, 0, 0);
-        
-        // 5. Enable Download & Update UI
-        currentOutputDataURL = canvas.toDataURL('image/png');
-        document.getElementById('downloadBtn').disabled = false;
-        document.getElementById('loading-spinner').classList.add('spinner-hidden');
-        updateStatus("✅ Upscale Complete! Click Download.", 'success');
+
+        // Done
+        currentOutputDataURL = outputCanvas.toDataURL('image/png');
+        downloadBtn.disabled = false;
+        loadingSpinner.classList.add('hidden');
+        setStatus("✅ Enhancement Done!", "ready");
 
     } catch (e) {
-        document.getElementById('loading-spinner').classList.add('spinner-hidden');
-        updateStatus("❌ Upscale Failed: " + e.message, 'error');
+        loadingSpinner.classList.add('hidden');
+        setStatus("❌ Enhancement Failed", "error");
+        console.error("Upscale Error:", e);
     }
 }
 
-// 5. Download Button Logic
-document.getElementById('downloadBtn').addEventListener('click', () => {
+// 6. Download Handler
+downloadBtn.addEventListener('click', () => {
     if (currentOutputDataURL) {
         const link = document.createElement('a');
-        link.download = 'upscaled_3x_image.png';
+        link.download = 'enhanced_3x.png';
         link.href = currentOutputDataURL;
         link.click();
     }
 });
 
-// Start the app
+// Start the App
 window.onload = loadModel;
