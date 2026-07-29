@@ -1,12 +1,23 @@
 /**
  * AI Image Upscaler - XLSR 3x
- * Working version with proper WASM loading
+ *
+ * Fixes applied vs original:
+ * 1. Actually tries WebGPU execution provider first, falls back to WASM
+ *    (original only ever used 'wasm', despite the UI promising WebGPU).
+ * 2. Preserves aspect ratio: instead of stretching every image into a
+ *    384x384 square (which baked black letterbox bars into the output),
+ *    we track the exact scale/offset used during preprocessing and crop
+ *    the corresponding region back out of the model output.
  */
 
 (function () {
     'use strict';
 
-    // ============ DOM ELEMENTS ============
+    // XLSR fixed I/O size (Qualcomm AI Hub 3x model): 128x128 in, 384x384 out.
+    const MODEL_INPUT_SIZE = 128;
+    const MODEL_OUTPUT_SIZE = 384; // 128 * 3
+    const SCALE_FACTOR = MODEL_OUTPUT_SIZE / MODEL_INPUT_SIZE;
+
     const uploadArea = document.getElementById('uploadArea');
     const fileInput = document.getElementById('fileInput');
     const uploadSection = document.getElementById('uploadSection');
@@ -29,18 +40,15 @@
     const mobileBanner = document.getElementById('mobileBanner');
     const dismissBanner = document.getElementById('dismissBanner');
 
-    // ============ STATE ============
     let ortSession = null;
     let isModelReady = false;
     let isProcessing = false;
-    let currentImage = null;
     let isMobileDevice = false;
+    let activeProvider = 'wasm';
 
-    // ============ DEVICE DETECTION ============
     function detectMobileDevice() {
-        const userAgent = navigator.userAgent || navigator.vendor || window.opera;
-        const mobileRegex = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i;
-        return mobileRegex.test(userAgent) || 
+        const ua = navigator.userAgent || navigator.vendor || window.opera;
+        return /Android|iPhone|iPad|iPod/i.test(ua) ||
                ('maxTouchPoints' in navigator && navigator.maxTouchPoints > 0 && window.innerWidth < 768);
     }
 
@@ -56,9 +64,8 @@
         mobileBanner.classList.remove('visible');
     }
 
-    // ============ DEBUG POPUP ============
-    function showDebug(message) {
-        debugContent.textContent = message;
+    function showDebug(msg) {
+        debugContent.textContent = msg;
         debugPopup.classList.remove('hidden');
     }
 
@@ -68,225 +75,213 @@
 
     closeDebug.addEventListener('click', hideDebug);
 
-    // ============ STATUS BADGE ============
-    function updateStatus(state, message) {
+    function updateStatus(state, msg) {
         statusDot.className = 'status-dot';
         if (state === 'loading') statusDot.classList.add('loading');
         else if (state === 'ready') statusDot.classList.add('ready');
         else if (state === 'error') statusDot.classList.add('error');
-        statusText.textContent = message;
+        statusText.textContent = msg;
     }
 
-    // ============ PROGRESS ============
-    function updateProgress(percent, message) {
-        const clampedPercent = Math.min(100, Math.max(0, Math.round(percent)));
-        progressFill.style.width = clampedPercent + '%';
-        progressText.textContent = clampedPercent + '%';
-        if (message) processingStatus.textContent = message;
+    function updateProgress(pct, msg) {
+        pct = Math.min(100, Math.max(0, Math.round(pct)));
+        progressFill.style.width = pct + '%';
+        progressText.textContent = pct + '%';
+        if (msg) processingStatus.textContent = msg;
     }
 
-    // ============ MODEL LOADING ============
-    async function loadModel() {
-        updateStatus('loading', 'Loading AI Model...');
-        
-        try {
-            // Step 1: Check ONNX Runtime
-            if (typeof ort === 'undefined') {
-                throw new Error('ONNX Runtime not loaded. Check internet connection.');
-            }
-            console.log('✅ ONNX Runtime version:', ort.env?.version || 'loaded');
+    function setUploadReady(ready) {
+        uploadArea.classList.toggle('not-ready', !ready);
+    }
 
-            // Step 2: Fetch model files
-            updateProgress(20, 'Fetching model files...');
-            
-            const modelUrl = 'static/xlsr.onnx';
-            
-            // Try to load directly from path
-            console.log('Loading model from:', modelUrl);
-            
-            const sessionOptions = {
-                executionProviders: ['wasm'],  // Use WASM first for reliability
-                graphOptimizationLevel: 'all',
-                logSeverityLevel: 0
-            };
+    // Try WebGPU first (desktop, supported browsers), fall back to WASM.
+    // This is what actually delivers on the "WebGPU" promise in the UI.
+    async function createSession(sourceOrBuffer) {
+        const webgpuAvailable = !isMobileDevice && 'gpu' in navigator;
 
-            updateProgress(40, 'Creating inference session...');
-            
-            let session;
+        if (webgpuAvailable) {
             try {
-                // Direct path loading - ONNX Runtime will automatically load .data file
-                session = await ort.InferenceSession.create(modelUrl, sessionOptions);
-                console.log('✅ Session created via direct path');
-            } catch (pathError) {
-                console.warn('Direct path failed:', pathError.message);
-                
-                // Fallback: Fetch files manually
-                updateProgress(50, 'Trying manual fetch...');
-                
-                const [modelRes, dataRes] = await Promise.all([
-                    fetch('static/xlsr.onnx'),
-                    fetch('static/xlsr.data')
-                ]);
-
-                if (!modelRes.ok || !dataRes.ok) {
-                    throw new Error('Failed to fetch model files. Check if files exist in static folder.');
-                }
-
-                const modelBuffer = await modelRes.arrayBuffer();
-                const dataBuffer = await dataRes.arrayBuffer();
-                
-                console.log('Model size:', (modelBuffer.byteLength / 1024).toFixed(1), 'KB');
-                console.log('Data size:', (dataBuffer.byteLength / 1024).toFixed(1), 'KB');
-
-                // Try with external data
-                session = await ort.InferenceSession.create(modelBuffer, {
-                    executionProviders: ['wasm'],
+                const session = await ort.InferenceSession.create(sourceOrBuffer, {
+                    executionProviders: ['webgpu'],
                     graphOptimizationLevel: 'all'
                 });
-                
-                console.log('✅ Session created via manual fetch');
+                activeProvider = 'webgpu';
+                return session;
+            } catch (err) {
+                console.warn('WebGPU EP failed, falling back to WASM:', err);
             }
+        }
 
-            // Step 3: Validate session
-            updateProgress(80, 'Validating model...');
-            
-            if (!session || !session.inputNames || session.inputNames.length === 0) {
-                throw new Error('Invalid model session');
-            }
+        const session = await ort.InferenceSession.create(sourceOrBuffer, {
+            executionProviders: ['wasm'],
+            graphOptimizationLevel: 'all'
+        });
+        activeProvider = 'wasm';
+        return session;
+    }
 
-            console.log('Model inputs:', session.inputNames);
-            console.log('Model outputs:', session.outputNames);
+    async function loadModel() {
+        updateStatus('loading', 'Loading Model...');
+        updateProgress(0, 'Checking runtime...');
+        setUploadReady(false);
+
+        if (typeof ort === 'undefined') {
+            throw new Error('ONNX Runtime not loaded');
+        }
+
+        try {
+            updateProgress(20, 'Loading XLSR model...');
+            const session = await createSession('static/xlsr.onnx');
 
             ortSession = session;
             isModelReady = true;
 
-            updateProgress(100, 'Model ready!');
-            updateStatus('ready', 'Ready');
-            
+            updateProgress(100, 'Ready!');
+            updateStatus('ready', activeProvider === 'webgpu' ? 'Ready (WebGPU)' : 'Ready (CPU)');
+            setUploadReady(true);
+
             setTimeout(() => {
                 processingSection.classList.add('hidden');
                 uploadSection.classList.remove('hidden');
             }, 500);
 
-        } catch (error) {
-            console.error('❌ Model loading failed:', error);
-            isModelReady = false;
-            ortSession = null;
-            updateStatus('error', 'Error');
-            
-            let debugMsg = 'MODEL LOADING ERROR\n\n';
-            debugMsg += 'Error: ' + error.message + '\n\n';
-            debugMsg += 'Troubleshooting:\n';
-            debugMsg += '1. Check if these files exist:\n';
-            debugMsg += '   - static/xlsr.onnx\n';
-            debugMsg += '   - static/xlsr.data\n';
-            debugMsg += '2. Clear browser cache (Ctrl+Shift+Del)\n';
-            debugMsg += '3. Check browser console (F12)\n';
-            debugMsg += '4. Use Chrome or Edge browser\n';
-            debugMsg += '5. Make sure server allows .onnx files\n\n';
-            debugMsg += 'Browser: ' + navigator.userAgent;
-            
-            showDebug(debugMsg);
-            throw error;
+        } catch (err) {
+            try {
+                updateProgress(30, 'Retrying with manual fetch...');
+                const resp = await fetch('static/xlsr.onnx');
+                if (!resp.ok) throw new Error('HTTP ' + resp.status + ' fetching model');
+                const buffer = await resp.arrayBuffer();
+
+                const session = await createSession(buffer);
+
+                ortSession = session;
+                isModelReady = true;
+
+                updateProgress(100, 'Ready!');
+                updateStatus('ready', activeProvider === 'webgpu' ? 'Ready (WebGPU)' : 'Ready (CPU)');
+                setUploadReady(true);
+
+                setTimeout(() => {
+                    processingSection.classList.add('hidden');
+                    uploadSection.classList.remove('hidden');
+                }, 500);
+
+            } catch (err2) {
+                updateStatus('error', 'Error');
+                showDebug(
+                    'MODEL ERROR\n\n' +
+                    'Error: ' + err2.message + '\n\n' +
+                    'FIX:\n' +
+                    '1. Make sure static/xlsr.onnx exists in the repo\n' +
+                    '2. Use the FLAT (float32) model, not the quantized/split one\n' +
+                    '3. Download from Qualcomm AI Hub\n' +
+                    '4. If serving locally, use a real HTTP server (not file://)'
+                );
+                throw err2;
+            }
         }
     }
 
-    // ============ IMAGE PROCESSING ============
-    function loadImageFromFile(file) {
+    function loadImage(file) {
         return new Promise((resolve, reject) => {
-            if (!file || !file.type.startsWith('image/')) {
-                reject(new Error('Invalid file type. Use JPG, PNG, or WebP.'));
-                return;
+            if (!file || !file.type || !file.type.startsWith('image/')) {
+                return reject(new Error('Select JPG, PNG or WebP'));
             }
-
             const reader = new FileReader();
-            reader.onload = (e) => {
+            reader.onload = e => {
                 const img = new Image();
                 img.onload = () => resolve(img);
-                img.onerror = () => reject(new Error('Cannot load image. File may be corrupted.'));
+                img.onerror = () => reject(new Error('Invalid image'));
                 img.src = e.target.result;
             };
-            reader.onerror = () => reject(new Error('Cannot read file.'));
+            reader.onerror = () => reject(new Error('Read failed'));
             reader.readAsDataURL(file);
         });
     }
 
-    function preprocessImage(image) {
-        const inputSize = 128;
+    /**
+     * Resize into the model's fixed input square, preserving aspect ratio
+     * (letterboxed with black padding), and remember exactly where the
+     * real image content ended up so we can crop the padding back out
+     * of the upscaled output.
+     */
+    function preprocess(img) {
+        const size = MODEL_INPUT_SIZE;
         const canvas = document.createElement('canvas');
-        canvas.width = inputSize;
-        canvas.height = inputSize;
+        canvas.width = size;
+        canvas.height = size;
         const ctx = canvas.getContext('2d');
 
-        // Black background
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, inputSize, inputSize);
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, size, size);
 
-        // Scale and center
-        const scale = Math.min(inputSize / image.width, inputSize / image.height);
-        const w = Math.round(image.width * scale);
-        const h = Math.round(image.height * scale);
-        const x = Math.floor((inputSize - w) / 2);
-        const y = Math.floor((inputSize - h) / 2);
+        const scale = Math.min(size / img.width, size / img.height);
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const offsetX = Math.floor((size - w) / 2);
+        const offsetY = Math.floor((size - h) / 2);
+        ctx.drawImage(img, offsetX, offsetY, w, h);
 
-        ctx.drawImage(image, x, y, w, h);
+        const pixels = ctx.getImageData(0, 0, size, size).data;
+        const tensor = new Float32Array(3 * size * size);
 
-        const imageData = ctx.getImageData(0, 0, inputSize, inputSize);
-        const pixels = imageData.data;
-
-        // NCHW format: [1, 3, 128, 128]
-        const floatData = new Float32Array(3 * inputSize * inputSize);
-        
-        for (let y = 0; y < inputSize; y++) {
-            for (let x = 0; x < inputSize; x++) {
-                const srcIdx = (y * inputSize + x) * 4;
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const si = (y * size + x) * 4;
                 for (let c = 0; c < 3; c++) {
-                    const dstIdx = c * inputSize * inputSize + y * inputSize + x;
-                    floatData[dstIdx] = pixels[srcIdx + c] / 255.0;
+                    tensor[c * size * size + y * size + x] = pixels[si + c] / 255.0;
                 }
             }
         }
 
-        return { floatData, canvas };
+        return {
+            tensor,
+            canvas,
+            crop: { offsetX, offsetY, w, h }
+        };
     }
 
-    async function runInference(floatData) {
-        if (!ortSession) {
-            throw new Error('Model not loaded. Refresh the page.');
-        }
+    /**
+     * Render the raw model output, then crop out the (scaled) letterbox
+     * padding so the final image matches the original aspect ratio
+     * instead of always being a distorted 384x384 square.
+     */
+    function postprocess(outputData, crop) {
+        const size = MODEL_OUTPUT_SIZE;
+        const fullCanvas = document.createElement('canvas');
+        fullCanvas.width = size;
+        fullCanvas.height = size;
+        const ctx = fullCanvas.getContext('2d');
+        const imgData = ctx.createImageData(size, size);
 
-        try {
-            const tensor = new ort.Tensor('float32', floatData, [1, 3, 128, 128]);
-            const feeds = { [ortSession.inputNames[0]]: tensor };
-            const results = await ortSession.run(feeds);
-            return results[ortSession.outputNames[0]];
-        } catch (error) {
-            throw new Error('Inference failed: ' + error.message);
-        }
-    }
-
-    function postprocessOutput(outputTensor) {
-        const outputSize = 384;
-        const data = outputTensor.data;
-        const canvas = document.createElement('canvas');
-        canvas.width = outputSize;
-        canvas.height = outputSize;
-        const ctx = canvas.getContext('2d');
-        const imageData = ctx.createImageData(outputSize, outputSize);
-
-        for (let y = 0; y < outputSize; y++) {
-            for (let x = 0; x < outputSize; x++) {
-                const idx = (y * outputSize + x) * 4;
+        for (let y = 0; y < size; y++) {
+            for (let x = 0; x < size; x++) {
+                const di = (y * size + x) * 4;
                 for (let c = 0; c < 3; c++) {
-                    const srcIdx = c * outputSize * outputSize + y * outputSize + x;
-                    imageData.data[idx + c] = Math.min(255, Math.max(0, Math.round(data[srcIdx] * 255)));
+                    const si = c * size * size + y * size + x;
+                    imgData.data[di + c] = Math.min(255, Math.max(0, Math.round(outputData[si] * 255)));
                 }
-                imageData.data[idx + 3] = 255;
+                imgData.data[di + 3] = 255;
             }
         }
+        ctx.putImageData(imgData, 0, 0);
 
-        ctx.putImageData(imageData, 0, 0);
-        return canvas;
+        // Crop out the padded region, scaled up by the same factor.
+        const cropX = Math.round(crop.offsetX * SCALE_FACTOR);
+        const cropY = Math.round(crop.offsetY * SCALE_FACTOR);
+        const cropW = Math.round(crop.w * SCALE_FACTOR);
+        const cropH = Math.round(crop.h * SCALE_FACTOR);
+
+        const finalCanvas = document.createElement('canvas');
+        finalCanvas.width = cropW;
+        finalCanvas.height = cropH;
+        finalCanvas.getContext('2d').drawImage(
+            fullCanvas,
+            cropX, cropY, cropW, cropH,
+            0, 0, cropW, cropH
+        );
+
+        return finalCanvas;
     }
 
     async function processImage(file) {
@@ -299,87 +294,75 @@
             resultsSection.classList.add('hidden');
             processingSection.classList.remove('hidden');
 
-            updateProgress(10, 'Loading image...');
-            const image = await loadImageFromFile(file);
-            
-            updateProgress(30, 'Preprocessing...');
-            const { floatData, canvas } = preprocessImage(image);
-            
-            updateProgress(50, 'Running AI...');
-            const outputTensor = await runInference(floatData);
-            
-            updateProgress(80, 'Creating result...');
-            const resultCanvas = postprocessOutput(outputTensor);
+            updateProgress(10, 'Loading...');
+            const img = await loadImage(file);
 
-            // Display original
-            originalCanvas.width = canvas.width;
-            originalCanvas.height = canvas.height;
-            originalCanvas.getContext('2d').drawImage(canvas, 0, 0);
-            originalInfo.textContent = `Original: ${image.width}×${image.height}px`;
+            updateProgress(30, 'Preparing...');
+            const { tensor, canvas: origCanvas, crop } = preprocess(img);
 
-            // Display enhanced
+            updateProgress(50, 'Upscaling (' + (activeProvider === 'webgpu' ? 'WebGPU' : 'CPU') + ')...');
+            const input = new ort.Tensor('float32', tensor, [1, 3, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE]);
+            const output = await ortSession.run({ [ortSession.inputNames[0]]: input });
+            const result = output[ortSession.outputNames[0]];
+
+            updateProgress(80, 'Rendering...');
+            const resultCanvas = postprocess(result.data, crop);
+
+            originalCanvas.width = img.width;
+            originalCanvas.height = img.height;
+            originalCanvas.getContext('2d').drawImage(img, 0, 0);
+            originalInfo.textContent = `Input: ${img.width}\u00d7${img.height}px`;
+
             enhancedCanvas.width = resultCanvas.width;
             enhancedCanvas.height = resultCanvas.height;
             enhancedCanvas.getContext('2d').drawImage(resultCanvas, 0, 0);
-            enhancedInfo.textContent = 'Enhanced: 384×384px (3×)';
+            enhancedInfo.textContent = `Enhanced: ${resultCanvas.width}\u00d7${resultCanvas.height}px (3\u00d7, ${activeProvider})`;
 
-            updateProgress(100, 'Complete!');
-            
+            updateProgress(100, 'Done!');
+
             setTimeout(() => {
                 processingSection.classList.add('hidden');
                 resultsSection.classList.remove('hidden');
             }, 300);
 
-        } catch (error) {
-            console.error(error);
-            showDebug('Processing Error:\n' + error.message);
+        } catch (err) {
+            showDebug('Error:\n' + err.message);
             processingSection.classList.add('hidden');
             uploadSection.classList.remove('hidden');
-            alert('Error: ' + error.message);
+            alert('Failed: ' + err.message);
         } finally {
             isProcessing = false;
         }
     }
 
-    // ============ EVENT HANDLERS ============
-    uploadArea.addEventListener('dragover', (e) => {
+    uploadArea.addEventListener('dragover', e => {
         e.preventDefault();
-        uploadArea.classList.add('drag-over');
+        if (isModelReady) uploadArea.classList.add('drag-over');
     });
 
     uploadArea.addEventListener('dragleave', () => {
         uploadArea.classList.remove('drag-over');
     });
 
-    uploadArea.addEventListener('drop', (e) => {
+    uploadArea.addEventListener('drop', e => {
         e.preventDefault();
         uploadArea.classList.remove('drag-over');
-        if (e.dataTransfer.files.length > 0) {
-            handleFile(e.dataTransfer.files[0]);
-        }
+        if (isModelReady && e.dataTransfer.files[0]) processImage(e.dataTransfer.files[0]);
     });
 
     uploadArea.addEventListener('click', () => {
         if (isModelReady) fileInput.click();
     });
 
-    fileInput.addEventListener('change', (e) => {
-        if (e.target.files.length > 0) {
-            handleFile(e.target.files[0]);
+    fileInput.addEventListener('change', e => {
+        if (e.target.files[0]) {
+            processImage(e.target.files[0]);
             e.target.value = '';
         }
     });
 
-    function handleFile(file) {
-        if (!isModelReady) {
-            alert('Model is still loading. Please wait...');
-            return;
-        }
-        processImage(file);
-    }
-
     downloadBtn.addEventListener('click', () => {
-        enhancedCanvas.toBlob((blob) => {
+        enhancedCanvas.toBlob(blob => {
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
@@ -392,8 +375,8 @@
     newImageBtn.addEventListener('click', () => {
         resultsSection.classList.add('hidden');
         uploadSection.classList.remove('hidden');
-        originalCanvas.getContext('2d').clearRect(0, 0, originalCanvas.width, originalCanvas.height);
-        enhancedCanvas.getContext('2d').clearRect(0, 0, enhancedCanvas.width, enhancedCanvas.height);
+        originalCanvas.width = 0;
+        enhancedCanvas.width = 0;
         hideDebug();
     });
 
@@ -403,28 +386,24 @@
         sessionStorage.setItem('bannerDismissed', 'true');
     });
 
-    document.addEventListener('keydown', (e) => {
+    document.addEventListener('keydown', e => {
         if (e.key === 'Escape') hideDebug();
     });
 
-    // ============ INIT ============
-    async function init() {
-        console.log('🚀 Starting AI Image Upscaler...');
+    async function start() {
         isMobileDevice = detectMobileDevice();
-        
+        setUploadReady(false);
+
         if (isMobileDevice && !sessionStorage.getItem('bannerDismissed')) {
             showMobileBanner();
         }
 
         try {
             await loadModel();
-            console.log('✅ Ready to upscale images!');
-        } catch (error) {
-            console.error('❌ Init failed:', error);
-            updateStatus('error', 'Failed');
+        } catch (err) {
+            console.error(err);
         }
     }
 
-    init();
-
+    start();
 })();
