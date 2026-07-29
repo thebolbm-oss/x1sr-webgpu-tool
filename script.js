@@ -35,9 +35,8 @@
     let isModelReady = false;
     let isProcessing = false;
     let currentImage = null;
-    let executionProvider = 'wasm'; // Default fallback
+    let executionProvider = 'wasm';
     let isMobileDevice = false;
-    let ortWasmInitialized = false;
 
     // ============ DEVICE DETECTION ============
     function detectMobileDevice() {
@@ -102,75 +101,77 @@
         }
     }
 
-    // ============ INITIALIZE ONNX RUNTIME WASM ============
-    async function initializeOrtRuntime() {
-        if (ortWasmInitialized) return true;
+    // ============ FETCH MODEL FILES ============
+    async function fetchModelFiles() {
+        updateProgress(15, 'Checking model files...');
         
         try {
-            updateProgress(10, 'Initializing ONNX Runtime WASM backend...');
+            // Check if model files exist
+            const modelResponse = await fetch('static/xlsr.onnx');
+            const dataResponse = await fetch('static/xlsr.data');
             
-            // Configure WASM path for ONNX Runtime
+            if (!modelResponse.ok) {
+                throw new Error(`Failed to fetch model: HTTP ${modelResponse.status}`);
+            }
+            if (!dataResponse.ok) {
+                throw new Error(`Failed to fetch data: HTTP ${dataResponse.status}`);
+            }
+            
+            updateProgress(25, 'Downloading model files...');
+            
+            const modelBuffer = await modelResponse.arrayBuffer();
+            const dataBuffer = await dataResponse.arrayBuffer();
+            
+            console.log('Model files fetched successfully');
+            console.log('Model size:', (modelBuffer.byteLength / 1024).toFixed(2), 'KB');
+            console.log('Data size:', (dataBuffer.byteLength / 1024).toFixed(2), 'KB');
+            
+            return { modelBuffer, dataBuffer };
+            
+        } catch (error) {
+            console.error('Failed to fetch model files:', error);
+            throw new Error(`Cannot access model files: ${error.message}. Make sure static/xlsr.onnx and static/xlsr.data exist.`);
+        }
+    }
+
+    // ============ LOAD MODEL WITH DIFFERENT STRATEGIES ============
+    
+    async function tryLoadWithWasmPath(modelBuffer, dataBuffer) {
+        updateProgress(35, 'Loading with WASM path config...');
+        
+        try {
+            // Configure WASM paths explicitly
             ort.env.wasm.wasmPaths = {
                 'ort-wasm.wasm': 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort-wasm.wasm',
                 'ort-wasm-simd.wasm': 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort-wasm-simd.wasm',
                 'ort-wasm-threaded.wasm': 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.17.1/dist/ort-wasm-threaded.wasm'
             };
             
-            // Set WASM configuration
-            ort.env.wasm.numThreads = 1; // Use single thread for better compatibility
-            ort.env.wasm.simd = true; // Enable SIMD if available
+            // Configure WASM settings
+            ort.env.wasm.numThreads = 1;
+            ort.env.wasm.simd = false; // Disable SIMD for better compatibility
             
-            ortWasmInitialized = true;
-            return true;
-        } catch (error) {
-            console.error('Failed to initialize WASM runtime:', error);
-            return false;
-        }
-    }
-
-    // ============ MODEL LOADING WITH MULTIPLE APPROACHES ============
-    async function loadModelApproach1() {
-        // Approach 1: Load from static folder with explicit external data
-        updateProgress(30, 'Approach 1: Loading with external data...');
-        
-        try {
-            const session = await ort.InferenceSession.create('static/xlsr.onnx', {
-                executionProviders: [executionProvider],
-                graphOptimizationLevel: 'all',
-                enableCpuMemArena: true,
-                enableMemPattern: true,
-                logSeverityLevel: 3 // verbose logging
+            const session = await ort.InferenceSession.create(modelBuffer, {
+                executionProviders: ['wasm'],
+                graphOptimizationLevel: 'basic',
+                enableCpuMemArena: false,
+                enableMemPattern: false
             });
+            
             return session;
         } catch (error) {
-            console.warn('Approach 1 failed:', error.message);
+            console.warn('WASM path method failed:', error.message);
             return null;
         }
     }
 
-    async function loadModelApproach2() {
-        // Approach 2: Fetch and load from ArrayBuffer
-        updateProgress(40, 'Approach 2: Loading from ArrayBuffer...');
+    async function tryLoadWithExternalData(modelBuffer, dataBuffer) {
+        updateProgress(45, 'Loading with external data...');
         
         try {
-            // Fetch both files manually
-            const [modelResponse, dataResponse] = await Promise.all([
-                fetch('static/xlsr.onnx'),
-                fetch('static/xlsr.data')
-            ]);
-            
-            if (!modelResponse.ok || !dataResponse.ok) {
-                throw new Error('Failed to fetch model files');
-            }
-            
-            const modelBuffer = await modelResponse.arrayBuffer();
-            const dataBuffer = await dataResponse.arrayBuffer();
-            
-            // Create a combined buffer or use external data
-            // ONNX Runtime Web supports loading from ArrayBuffer with external data
             const session = await ort.InferenceSession.create(modelBuffer, {
-                executionProviders: [executionProvider],
-                graphOptimizationLevel: 'all',
+                executionProviders: ['wasm'],
+                graphOptimizationLevel: 'basic',
                 externalData: [
                     {
                         name: 'xlsr.data',
@@ -181,207 +182,165 @@
             
             return session;
         } catch (error) {
-            console.warn('Approach 2 failed:', error.message);
+            console.warn('External data method failed:', error.message);
             return null;
         }
     }
 
-    async function loadModelApproach3() {
-        // Approach 3: Load from combined buffer (merge .onnx and .data)
-        updateProgress(50, 'Approach 3: Loading combined model buffer...');
-        
-        try {
-            // Fetch both files
-            const [modelResponse, dataResponse] = await Promise.all([
-                fetch('static/xlsr.onnx'),
-                fetch('static/xlsr.data')
-            ]);
-            
-            if (!modelResponse.ok || !dataResponse.ok) {
-                throw new Error('Failed to fetch model files');
-            }
-            
-            const modelBuffer = await modelResponse.arrayBuffer();
-            const dataBuffer = await dataResponse.arrayBuffer();
-            
-            // Create a combined buffer
-            const combinedBuffer = new Uint8Array(modelBuffer.byteLength + dataBuffer.byteLength);
-            combinedBuffer.set(new Uint8Array(modelBuffer), 0);
-            combinedBuffer.set(new Uint8Array(dataBuffer), modelBuffer.byteLength);
-            
-            const session = await ort.InferenceSession.create(combinedBuffer.buffer, {
-                executionProviders: [executionProvider],
-                graphOptimizationLevel: 'all'
-            });
-            
-            return session;
-        } catch (error) {
-            console.warn('Approach 3 failed:', error.message);
-            return null;
-        }
-    }
-
-    async function loadModelApproach4() {
-        // Approach 4: Try WebGPU with specific options
-        if (executionProvider === 'webgpu') {
-            updateProgress(60, 'Approach 4: WebGPU specific loading...');
-            
-            try {
-                const session = await ort.InferenceSession.create('static/xlsr.onnx', {
-                    executionProviders: ['webgpu'],
-                    graphOptimizationLevel: 'basic', // Less optimization for better compatibility
-                    enableCpuMemArena: false,
-                    enableMemPattern: false
-                });
-                return session;
-            } catch (error) {
-                console.warn('Approach 4 failed:', error.message);
-                return null;
-            }
-        }
-        return null;
-    }
-
-    async function loadModelApproach5() {
-        // Approach 5: WASM with minimal configuration
-        updateProgress(70, 'Approach 5: WASM minimal configuration...');
+    async function tryLoadAsFilePath() {
+        updateProgress(55, 'Loading from file path...');
         
         try {
             const session = await ort.InferenceSession.create('static/xlsr.onnx', {
                 executionProviders: ['wasm'],
                 graphOptimizationLevel: 'basic'
             });
+            
             return session;
         } catch (error) {
-            console.warn('Approach 5 failed:', error.message);
+            console.warn('File path method failed:', error.message);
+            return null;
+        }
+    }
+
+    async function tryLoadWebGPU(modelBuffer) {
+        if (typeof navigator.gpu === 'undefined') {
+            return null;
+        }
+        
+        updateProgress(65, 'Attempting WebGPU acceleration...');
+        
+        try {
+            const session = await ort.InferenceSession.create(modelBuffer, {
+                executionProviders: ['webgpu'],
+                graphOptimizationLevel: 'basic',
+                enableCpuMemArena: false,
+                enableMemPattern: false
+            });
+            
+            executionProvider = 'webgpu';
+            return session;
+        } catch (error) {
+            console.warn('WebGPU method failed:', error.message);
+            executionProvider = 'wasm';
+            return null;
+        }
+    }
+
+    async function tryLoadWithOrtConfig(modelBuffer) {
+        updateProgress(75, 'Loading with custom config...');
+        
+        try {
+            // Create session with minimal config
+            const sessionOptions = {
+                executionProviders: ['wasm'],
+                graphOptimizationLevel: 'disabled',
+                logSeverityLevel: 2
+            };
+            
+            const session = await ort.InferenceSession.create(modelBuffer, sessionOptions);
+            return session;
+        } catch (error) {
+            console.warn('Custom config method failed:', error.message);
             return null;
         }
     }
 
     async function loadModel() {
         updateStatus('loading', 'Loading AI Model...');
-        updateProgress(5, 'Checking ONNX Runtime availability...');
+        updateProgress(5, 'Initializing ONNX Runtime...');
 
         try {
             // Verify ONNX Runtime is available
             if (typeof ort === 'undefined') {
-                throw new Error(
-                    'ONNX Runtime Web failed to load. Please check your internet connection.'
-                );
+                throw new Error('ONNX Runtime Web not loaded. Check internet connection.');
             }
 
-            // Initialize WASM runtime
-            updateProgress(15, 'Initializing runtime...');
-            await initializeOrtRuntime();
+            console.log('ONNX Runtime loaded, version:', ort?.version || 'unknown');
 
-            // Detect best execution provider
-            const isWebGPUAvailable = typeof navigator.gpu !== 'undefined';
-            
-            if (isWebGPUAvailable && !isMobileDevice) {
-                executionProvider = 'webgpu';
-                updateProgress(20, 'WebGPU detected. Trying GPU acceleration...');
-            } else {
-                executionProvider = 'wasm';
-                updateProgress(20, 'Using CPU mode...');
-            }
+            // Fetch model files first
+            const { modelBuffer, dataBuffer } = await fetchModelFiles();
 
-            // Log ONNX Runtime version
-            console.log('ONNX Runtime version:', ort.version);
-            console.log('Available execution providers:', ort.env.webgpu ? 'WebGPU available' : 'WebGPU not available');
+            updateProgress(30, 'Loading model into memory...');
 
             let session = null;
-            const approaches = [];
+            const strategies = [
+                { name: 'External Data', fn: () => tryLoadWithExternalData(modelBuffer, dataBuffer) },
+                { name: 'File Path', fn: () => tryLoadAsFilePath() },
+                { name: 'Custom Config', fn: () => tryLoadWithOrtConfig(modelBuffer) },
+                { name: 'WebGPU', fn: () => tryLoadWebGPU(modelBuffer) },
+                { name: 'WASM Config', fn: () => tryLoadWithWasmPath(modelBuffer, dataBuffer) }
+            ];
 
-            // Determine which approaches to try based on provider
-            if (executionProvider === 'webgpu') {
-                approaches.push(
-                    { name: 'WebGPU External Data', fn: loadModelApproach1 },
-                    { name: 'WebGPU Specific', fn: loadModelApproach4 },
-                    { name: 'ArrayBuffer', fn: loadModelApproach2 }
-                );
-            }
-            
-            // Always add WASM fallback approaches
-            approaches.push(
-                { name: 'WASM External Data', fn: loadModelApproach5 },
-                { name: 'ArrayBuffer', fn: loadModelApproach2 },
-                { name: 'Combined Buffer', fn: loadModelApproach3 }
-            );
-
-            // Try each approach
-            let lastError = null;
-            
-            for (const approach of approaches) {
+            for (const strategy of strategies) {
                 try {
-                    updateProgress(25, `Trying: ${approach.name}...`);
-                    session = await approach.fn();
+                    console.log(`Trying strategy: ${strategy.name}`);
+                    session = await strategy.fn();
                     
                     if (session) {
-                        console.log(`✅ Model loaded successfully via: ${approach.name}`);
-                        
-                        // Update execution provider if we fell back
-                        if (approach.name.includes('WASM')) {
-                            executionProvider = 'wasm';
-                        }
-                        
+                        console.log(`✅ Success with strategy: ${strategy.name}`);
                         break;
                     }
                 } catch (error) {
-                    console.warn(`❌ ${approach.name} failed:`, error.message);
-                    lastError = error;
-                    
-                    // If WebGPU failed, switch to WASM for subsequent attempts
-                    if (executionProvider === 'webgpu' && approach.name.includes('WebGPU')) {
-                        console.log('WebGPU approaches failed, switching to WASM...');
-                        executionProvider = 'wasm';
-                        updateProgress(30, 'Falling back to CPU mode...');
-                    }
+                    console.warn(`❌ Strategy ${strategy.name} failed:`, error.message);
                 }
             }
 
             if (!session) {
-                throw lastError || new Error('All loading approaches failed');
+                throw new Error('All loading strategies failed. Model might be incompatible.');
             }
 
-            // Verify model
-            updateProgress(90, 'Validating model...');
-            console.log('Model inputs:', session.inputNames);
-            console.log('Model outputs:', session.outputNames);
+            // Validate model
+            updateProgress(85, 'Validating model...');
             
+            if (!session.inputNames || !session.outputNames || 
+                session.inputNames.length === 0 || session.outputNames.length === 0) {
+                throw new Error('Invalid model: no inputs or outputs found');
+            }
+
+            console.log('Model loaded successfully');
+            console.log('Input names:', session.inputNames);
+            console.log('Output names:', session.outputNames);
+            console.log('Provider:', executionProvider);
+
             ortSession = session;
             isModelReady = true;
-            
+
             updateProgress(100, 'Model ready!');
             updateStatus('ready', `Ready (${executionProvider.toUpperCase()})`);
-            
-            await new Promise(resolve => setTimeout(resolve, 500));
+
+            // Short delay to show completion
+            await new Promise(resolve => setTimeout(resolve, 800));
+
+            // Hide progress after success
+            processingSection.classList.add('hidden');
+            uploadSection.classList.remove('hidden');
 
         } catch (error) {
-            console.error('Model loading error:', error);
+            console.error('Model loading failed:', error);
             isModelReady = false;
             ortSession = null;
             updateStatus('error', 'Error');
-            
-            // Detailed error message
-            let errorMsg = `Model Loading Failed:\n\n`;
-            errorMsg += `Error: ${error.message}\n`;
-            if (error.stack) {
-                errorMsg += `\nStack: ${error.stack.substring(0, 300)}...\n`;
-            }
-            errorMsg += `\nEnvironment:\n`;
-            errorMsg += `- Provider: ${executionProvider}\n`;
-            errorMsg += `- Mobile: ${isMobileDevice}\n`;
-            errorMsg += `- WebGPU: ${typeof navigator.gpu !== 'undefined'}\n`;
-            errorMsg += `- ORT Version: ${ort?.version || 'unknown'}\n`;
-            errorMsg += `\nTroubleshooting:\n`;
-            errorMsg += `1. Clear browser cache and reload\n`;
-            errorMsg += `2. Check console for CORS errors\n`;
-            errorMsg += `3. Verify files exist: static/xlsr.onnx & static/xlsr.data\n`;
-            errorMsg += `4. Try Chrome/Edge latest version\n`;
+            updateProgress(0, '');
+
+            let errorMsg = 'Model Loading Failed:\n\n';
+            errorMsg += `Error: ${error.message}\n\n`;
+            errorMsg += `Environment Info:\n`;
+            errorMsg += `• Provider: ${executionProvider}\n`;
+            errorMsg += `• Mobile: ${isMobileDevice}\n`;
+            errorMsg += `• WebGPU Available: ${typeof navigator.gpu !== 'undefined'}\n`;
+            errorMsg += `• ORT Version: ${ort?.version || 'unknown'}\n`;
+            errorMsg += `• Browser: ${navigator.userAgent}\n\n`;
+            errorMsg += `Troubleshooting Steps:\n`;
+            errorMsg += `1. Clear browser cache (Ctrl+Shift+Del)\n`;
+            errorMsg += `2. Try Chrome/Edge latest version\n`;
+            errorMsg += `3. Check Console (F12) for errors\n`;
+            errorMsg += `4. Verify these files exist:\n`;
+            errorMsg += `   - static/xlsr.onnx\n`;
+            errorMsg += `   - static/xlsr.data\n`;
             errorMsg += `5. Check server MIME types:\n`;
-            errorMsg += `   - .onnx → application/octet-stream\n`;
-            errorMsg += `   - .data → application/octet-stream\n`;
-            
+            errorMsg += `   Both should be "application/octet-stream"`;
+
             showDebug(errorMsg);
             throw error;
         }
@@ -391,7 +350,7 @@
     function loadImageFromFile(file) {
         return new Promise((resolve, reject) => {
             if (!file || !file.type.startsWith('image/')) {
-                reject(new Error('Please select a valid image file.'));
+                reject(new Error('Please select a valid image file (JPG, PNG, WebP).'));
                 return;
             }
 
@@ -399,7 +358,7 @@
             reader.onload = (e) => {
                 const img = new Image();
                 img.onload = () => resolve(img);
-                img.onerror = () => reject(new Error('Failed to load image.'));
+                img.onerror = () => reject(new Error('Failed to load image. File might be corrupted.'));
                 img.src = e.target.result;
             };
             reader.onerror = () => reject(new Error('Failed to read file.'));
@@ -414,9 +373,11 @@
         offscreenCanvas.height = inputSize;
         const ctx = offscreenCanvas.getContext('2d');
 
+        // Black background
         ctx.fillStyle = '#000000';
         ctx.fillRect(0, 0, inputSize, inputSize);
 
+        // Calculate aspect ratio
         const scale = Math.min(inputSize / image.width, inputSize / image.height);
         const scaledWidth = Math.round(image.width * scale);
         const scaledHeight = Math.round(image.height * scale);
@@ -428,6 +389,7 @@
         const imageData = ctx.getImageData(0, 0, inputSize, inputSize);
         const { data } = imageData;
 
+        // Convert to NCHW format
         const channels = 3;
         const floatData = new Float32Array(1 * channels * inputSize * inputSize);
 
@@ -451,14 +413,24 @@
             throw new Error('Model not loaded. Please refresh the page.');
         }
 
-        const inputName = ortSession.inputNames[0];
-        const outputName = ortSession.outputNames[0];
+        try {
+            const inputName = ortSession.inputNames[0];
+            const outputName = ortSession.outputNames[0];
 
-        const tensor = new ort.Tensor('float32', floatData, [1, 3, 128, 128]);
-        const feeds = { [inputName]: tensor };
-        const results = await ortSession.run(feeds);
-        
-        return results[outputName];
+            const tensor = new ort.Tensor('float32', floatData, [1, 3, 128, 128]);
+            const feeds = { [inputName]: tensor };
+            
+            const results = await ortSession.run(feeds);
+            
+            if (!results || !results[outputName]) {
+                throw new Error('Inference returned no output');
+            }
+            
+            return results[outputName];
+        } catch (error) {
+            console.error('Inference error:', error);
+            throw new Error(`Inference failed: ${error.message}`);
+        }
     }
 
     function postprocessOutput(outputTensor) {
@@ -508,52 +480,52 @@
             const image = await loadImageFromFile(file);
             currentImage = image;
 
-            updateProgress(15, 'Preprocessing...');
+            updateProgress(20, 'Preprocessing image...');
             const { floatData, offscreenCanvas: preprocessedCanvas } = preprocessImage(image);
 
-            updateProgress(30, 'Running AI inference...');
+            updateProgress(40, 'Running AI upscaling...');
             const outputTensor = await runInference(floatData);
 
-            updateProgress(70, 'Postprocessing...');
+            updateProgress(75, 'Rendering result...');
             const resultCanvas = postprocessOutput(outputTensor);
 
-            updateProgress(85, 'Rendering...');
-            
+            // Display original
             const origCtx = originalCanvas.getContext('2d');
             originalCanvas.width = preprocessedCanvas.width;
             originalCanvas.height = preprocessedCanvas.height;
             origCtx.drawImage(preprocessedCanvas, 0, 0);
-            
+
+            // Display enhanced
             const enhCtx = enhancedCanvas.getContext('2d');
             enhancedCanvas.width = resultCanvas.width;
             enhancedCanvas.height = resultCanvas.height;
             enhCtx.drawImage(resultCanvas, 0, 0);
 
-            originalInfo.textContent = `Input: ${image.width}×${image.height} → 128×128`;
-            enhancedInfo.textContent = `Output: 384×384 (3× upscale)`;
+            originalInfo.textContent = `Input: ${image.width}×${image.height}px → 128×128px`;
+            enhancedInfo.textContent = `Output: 384×384px (3× upscale)`;
 
-            updateProgress(100, 'Done!');
-            
+            updateProgress(100, 'Complete!');
+
             await new Promise(resolve => setTimeout(resolve, 300));
             processingSection.classList.add('hidden');
             resultsSection.classList.remove('hidden');
 
         } catch (error) {
             console.error('Processing error:', error);
-            
-            const errorMsg = `Image Processing Failed:\n\n` +
+
+            const errorMsg = `Processing Failed:\n\n` +
                 `Error: ${error.message}\n\n` +
                 `Provider: ${executionProvider}\n` +
                 `Model Ready: ${isModelReady}`;
-            
+
             showDebug(errorMsg);
-            
+
             processingSection.classList.add('hidden');
             resultsSection.classList.add('hidden');
             uploadSection.classList.remove('hidden');
             updateProgress(0, '');
-            
-            alert('Processing failed. Check debug popup for details.');
+
+            alert('Failed to process image. See debug popup for details.');
         } finally {
             isProcessing = false;
         }
@@ -562,7 +534,7 @@
     // ============ EVENT HANDLERS ============
     function handleFileSelect(file) {
         if (!isModelReady) {
-            alert('AI model is still loading. Please wait.');
+            alert('AI model is still loading. Please wait for "Ready" status.');
             return;
         }
         if (file) {
@@ -592,10 +564,10 @@
         }
     });
 
-    uploadArea.addEventListener('click', () => {
+    uploadArea.addEventListener('click', (e) => {
         if (isModelReady) {
             fileInput.click();
-        } else if (!isModelReady && ortSession === null) {
+        } else if (!isModelReady) {
             alert('Please wait for the AI model to finish loading.');
         }
     });
@@ -614,7 +586,7 @@
             const url = URL.createObjectURL(blob);
             const link = document.createElement('a');
             link.href = url;
-            link.download = 'enhanced-image.png';
+            link.download = 'enhanced-3x.png';
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
@@ -625,10 +597,13 @@
     newImageBtn.addEventListener('click', () => {
         resultsSection.classList.add('hidden');
         uploadSection.classList.remove('hidden');
+        
+        // Clear canvases
         const origCtx = originalCanvas.getContext('2d');
         origCtx.clearRect(0, 0, originalCanvas.width, originalCanvas.height);
         const enhCtx = enhancedCanvas.getContext('2d');
         enhCtx.clearRect(0, 0, enhancedCanvas.width, enhancedCanvas.height);
+        
         currentImage = null;
         hideDebug();
     });
@@ -649,40 +624,52 @@
 
     // ============ INITIALIZATION ============
     async function initializeApp() {
+        console.log('Initializing AI Image Upscaler...');
         updateStatus('loading', 'Initializing...');
+
+        // Detect device
         isMobileDevice = detectMobileDevice();
-        
+        console.log('Mobile device:', isMobileDevice);
+        console.log('WebGPU available:', typeof navigator.gpu !== 'undefined');
+
+        // Show mobile banner if needed
         const bannerDismissed = sessionStorage.getItem('bannerDismissed');
         if (isMobileDevice && !bannerDismissed) {
             showMobileBanner();
         }
 
+        // Load model
         try {
             await loadModel();
+            console.log('✅ Application initialized successfully');
         } catch (error) {
-            console.error('Initialization failed:', error);
+            console.error('❌ Initialization failed:', error);
             updateStatus('error', 'Model Failed');
-            
+
+            // Add error notice
             const errorNotice = document.createElement('div');
             errorNotice.style.cssText = `
                 text-align: center;
                 padding: 16px;
-                margin-bottom: 16px;
+                margin: 16px 0;
                 background: rgba(239, 68, 68, 0.15);
                 border: 1px solid rgba(239, 68, 68, 0.3);
                 border-radius: 12px;
                 color: #ef4444;
                 font-size: 0.9rem;
+                line-height: 1.5;
             `;
-            errorNotice.textContent = '⚠️ AI model failed to load. Try refreshing the page or using Chrome/Edge.';
+            errorNotice.innerHTML = '⚠️ <strong>AI model failed to load</strong><br>' +
+                'Try: Clearing cache • Using Chrome/Edge • Checking console (F12)';
             
             const header = document.querySelector('.header');
             header.insertAdjacentElement('afterend', errorNotice);
         }
     }
 
+    // Start app
     initializeApp().catch((error) => {
-        console.error('Fatal initialization error:', error);
+        console.error('Fatal error:', error);
     });
 
 })();
