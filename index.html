@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -9,45 +8,46 @@
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 </head>
 <body>
-
-    <div class="glass-container">
+    <div class="container">
         <div class="header">
-            <div class="logo">✨ XLSR 3x</div>
-            <span class="badge">WebGPU Accelerated</span>
+            <h2>⚡ XLSR Enhancer</h2>
+            <span id="statusBadge" class="badge-idle">⏳ Loading Model...</span>
         </div>
-        
-        <h1>Real-Time AI Upscaler</h1>
-        <p class="subtitle">Enhance your images instantly using WebGPU. 100% private, runs in your browser.</p>
-        
-        <div class="upload-area" id="uploadArea">
+
+        <!-- Upload Area -->
+        <div class="upload-box" id="uploadArea">
             <input type="file" id="imageInput" accept="image/*">
-            <div class="upload-content">
-                <span class="icon">🖼️</span>
-                <p>Drop your image here or click to browse</p>
-                <small>Supports JPEG, PNG, WEBP</small>
-            </div>
+            <p class="upload-icon">🖼️</p>
+            <p class="upload-text">Click or Drag Image Here</p>
+            <p class="upload-sub">100% Private. Runs on WebGPU.</p>
         </div>
 
-        <div id="status-bar" class="status-idle">📁 Waiting for image...</div>
+        <!-- Download Progress Bar (File Size 140KB, toh Instant hoga) -->
+        <div class="progress-container" id="progressContainer" style="display: none;">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill" style="width: 0%;"></div>
+            </div>
+            <p class="progress-text" id="progressText">Initializing...</p>
+        </div>
 
-        <div class="preview-container">
+        <!-- Preview Section -->
+        <div class="preview-row">
             <div class="image-box">
-                <div class="box-label">Original</div>
-                <img id="originalImage" src="" alt="Uploaded Image">
+                <p class="label">📥 Input (Low Res)</p>
+                <img id="originalImage" src="" alt="Upload here">
             </div>
             <div class="arrow">➡️</div>
             <div class="image-box">
-                <div class="box-label">Upscaled (3x)</div>
-                <div id="canvas-container">
+                <p class="label">🚀 Enhanced (3x AI)</p>
+                <div class="canvas-wrapper">
                     <canvas id="outputCanvas"></canvas>
-                    <div id="loading-spinner" class="spinner-hidden"></div>
+                    <div id="loadingSpinner" class="hidden">🔄 Enhancing...</div>
                 </div>
             </div>
         </div>
 
-        <button id="downloadBtn" class="download-btn" disabled>⬇️ Download Enhanced Image</button>
+        <button id="downloadBtn" class="btn-download" disabled>⬇️ Download HD Image</button>
     </div>
-
     <script src="script.js"></script>
 </body>
 </html>
