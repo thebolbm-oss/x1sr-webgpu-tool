@@ -13,13 +13,47 @@ const outputCanvas = document.getElementById('outputCanvas');
 const loadingSpinner = document.getElementById('loadingSpinner');
 const downloadBtn = document.getElementById('downloadBtn');
 
+// --- LIVE DEBUG POPUP FUNCTION ---
+function showErrorPopup(message, errorDetails) {
+    // Pehle se agar koi popup hai toh hatao
+    const existingPopup = document.getElementById('debug-popup');
+    if(existingPopup) existingPopup.remove();
+
+    // Naya popup banayein
+    const popup = document.createElement('div');
+    popup.id = 'debug-popup';
+    popup.style.cssText = `
+        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+        width: 90%; max-width: 400px; background: #161b22; color: #f0f6fc;
+        padding: 20px; border-radius: 12px; border: 2px solid #da3633;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.8); z-index: 9999;
+        font-family: system-ui, sans-serif;
+    `;
+    
+    popup.innerHTML = `
+        <h3 style="color: #da3633; margin-top:0;">❌ Error Detected</h3>
+        <p style="font-size:0.9rem; background:#0d1117; padding:10px; border-radius:6px; word-break:break-all;">
+            <strong>Message:</strong> ${message}<br><br>
+            <strong>Details:</strong> <span style="color:#ffa657;">${errorDetails}</span>
+        </p>
+        <p style="font-size:0.85rem; color:#8b949e; margin-top:10px;">
+            💡 <strong>Tip:</strong> Open this website on a <strong>Laptop/PC</strong> using <strong>Google Chrome or Edge</strong>.<br>
+            Mobile WebGPU is unstable for this tool.
+        </p>
+        <button onclick="this.parentElement.remove()" style="margin-top:15px; width:100%; padding:10px; background:#238636; color:white; border:none; border-radius:6px; font-weight:bold; cursor:pointer;">
+            Got it, Close
+        </button>
+    `;
+    document.body.appendChild(popup);
+}
+
 // 1. Update Status Function
 function setStatus(text, type) {
     statusBadge.innerText = text;
     statusBadge.className = 'badge-' + type;
 }
 
-// 2. Progress Bar Function (File size ~140KB, so it will be instant)
+// 2. Progress Bar Function
 function updateProgress(percent, text) {
     progressContainer.style.display = 'block';
     progressFill.style.width = percent + '%';
@@ -29,7 +63,7 @@ function updateProgress(percent, text) {
     }
 }
 
-// 3. Load Model with Progress Tracking
+// 3. Load Model
 async function loadModel() {
     setStatus("Downloading Model...", "working");
     updateProgress(0, "Loading AI...");
@@ -38,12 +72,10 @@ async function loadModel() {
         const ort = window.ort;
         ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
 
-        // Simulate progress since file is tiny
-        updateProgress(30, "Initializing WebGPU...");
+        updateProgress(30, "Initializing...");
         
-        // ⚠️ IMPORTANT: Path changed to 'static/xlsr.onnx'
         session = await ort.InferenceSession.create('static/xlsr.onnx', {
-            executionProviders: ['webgpu', 'wasm']
+            executionProviders: ['webgpu', 'wasm'] // Pehle WebGPU try karega, nahi to WASM
         });
 
         updateProgress(100, "Model Ready!");
@@ -52,15 +84,21 @@ async function loadModel() {
         
     } catch (e) {
         updateProgress(0, "Error loading model");
-        setStatus("❌ Error: Check Console", "error");
-        console.error("Load Error:", e);
+        setStatus("❌ Error", "error");
+        console.error("Detailed Error:", e);
+        
+        // 👇 YAHAN POPUP CALL HO RAHA HAI
+        showErrorPopup("Failed to create AI session", e.message || e);
     }
 }
 
 // 4. Handle Image Upload
 uploadArea.addEventListener('click', () => imageInput.click());
 imageInput.addEventListener('change', function(e) {
-    if (!session) { alert("Please wait, model is still loading!"); return; }
+    if (!session) { 
+        showErrorPopup("Model not loaded", "Please wait, model file 'static/xlsr.onnx' failed to load. Try on PC.");
+        return; 
+    }
     const file = e.target.files[0];
     if (!file) return;
 
@@ -86,14 +124,12 @@ async function upscaleImage(img) {
     outputCanvas.width = outputSize;
     outputCanvas.height = outputSize;
 
-    // Resize to 128x128
     let tempCanvas = document.createElement('canvas');
     tempCanvas.width = inputSize; tempCanvas.height = inputSize;
     let tempCtx = tempCanvas.getContext('2d');
     tempCtx.drawImage(img, 0, 0, inputSize, inputSize);
     let imageData = tempCtx.getImageData(0, 0, inputSize, inputSize);
 
-    // Convert to Uint8 Tensor (for w8a8 model)
     const { data, width, height } = imageData;
     const dataTensor = new Uint8Array(3 * width * height);
     for (let i = 0; i < width * height; i++) {
@@ -109,7 +145,6 @@ async function upscaleImage(img) {
         const results = await session.run(feeds);
         const outputData = results.output.data;
 
-        // Convert output back to Image
         const imageDataOutput = ctx.createImageData(outputSize, outputSize);
         for (let i = 0; i < outputSize * outputSize; i++) {
             imageDataOutput.data[i * 4] = Math.min(255, outputData[i]);
@@ -119,7 +154,6 @@ async function upscaleImage(img) {
         }
         ctx.putImageData(imageDataOutput, 0, 0);
 
-        // Done
         currentOutputDataURL = outputCanvas.toDataURL('image/png');
         downloadBtn.disabled = false;
         loadingSpinner.classList.add('hidden');
@@ -128,7 +162,7 @@ async function upscaleImage(img) {
     } catch (e) {
         loadingSpinner.classList.add('hidden');
         setStatus("❌ Enhancement Failed", "error");
-        console.error("Upscale Error:", e);
+        showErrorPopup("AI Upscaling Failed", e.message || e);
     }
 }
 
@@ -142,5 +176,4 @@ downloadBtn.addEventListener('click', () => {
     }
 });
 
-// Start the App
 window.onload = loadModel;
