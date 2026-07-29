@@ -2,52 +2,129 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>XLSR AI Upscaler</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="description" content="AI Image Upscaling - 3x enhancement using WebGPU ONNX Runtime">
+    <title>AI Image Upscaler | XLSR 3x</title>
     <link rel="stylesheet" href="style.css">
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
 </head>
 <body>
+    <!-- Mobile Suggestion Banner -->
+    <div id="mobileBanner" class="mobile-banner hidden">
+        <span class="banner-icon">💡</span>
+        <span class="banner-text">For fastest WebGPU performance, open this on a PC. CPU mode active.</span>
+        <button id="dismissBanner" class="banner-dismiss" aria-label="Dismiss">×</button>
+    </div>
+
     <div class="container">
-        <div class="header">
-            <h2>⚡ XLSR Enhancer</h2>
-            <span id="statusBadge" class="badge-idle">⏳ Loading Model...</span>
-        </div>
-
-        <!-- Upload Area -->
-        <div class="upload-box" id="uploadArea">
-            <input type="file" id="imageInput" accept="image/*">
-            <p class="upload-icon">🖼️</p>
-            <p class="upload-text">Click or Drag Image Here</p>
-            <p class="upload-sub">100% Private. Runs on WebGPU.</p>
-        </div>
-
-        <!-- Download Progress Bar (File Size 140KB, toh Instant hoga) -->
-        <div class="progress-container" id="progressContainer" style="display: none;">
-            <div class="progress-bar">
-                <div class="progress-fill" id="progressFill" style="width: 0%;"></div>
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect width="32" height="32" rx="8" fill="url(#logo-grad)"/>
+                    <path d="M8 16L14 10L20 16L26 10" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+                    <path d="M8 22L14 16L20 22L26 16" stroke="white" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none" opacity="0.6"/>
+                    <defs>
+                        <linearGradient id="logo-grad" x1="0" y1="0" x2="32" y2="32">
+                            <stop offset="0%" stop-color="#6366f1"/>
+                            <stop offset="100%" stop-color="#a855f7"/>
+                        </linearGradient>
+                    </defs>
+                </svg>
+                <h1>AI Image Upscaler</h1>
             </div>
-            <p class="progress-text" id="progressText">Initializing...</p>
-        </div>
-
-        <!-- Preview Section -->
-        <div class="preview-row">
-            <div class="image-box">
-                <p class="label">📥 Input (Low Res)</p>
-                <img id="originalImage" src="" alt="Upload here">
+            <div class="status-badge" id="statusBadge">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Initializing...</span>
             </div>
-            <div class="arrow">➡️</div>
-            <div class="image-box">
-                <p class="label">🚀 Enhanced (3x AI)</p>
-                <div class="canvas-wrapper">
-                    <canvas id="outputCanvas"></canvas>
-                    <div id="loadingSpinner" class="hidden">🔄 Enhancing...</div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Upload Section -->
+            <div class="upload-section" id="uploadSection">
+                <div class="upload-area" id="uploadArea">
+                    <div class="upload-icon">
+                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="17 8 12 3 7 8"/>
+                            <line x1="12" y1="3" x2="12" y2="15"/>
+                        </svg>
+                    </div>
+                    <h2>Upload Image to Upscale</h2>
+                    <p>Drag & drop or click to browse</p>
+                    <p class="upload-hint">Supports JPG, PNG, WebP • 3x AI Enhancement</p>
+                    <input type="file" id="fileInput" accept="image/jpeg,image/png,image/webp" hidden>
                 </div>
             </div>
-        </div>
 
-        <button id="downloadBtn" class="btn-download" disabled>⬇️ Download HD Image</button>
+            <!-- Processing Section -->
+            <div class="processing-section hidden" id="processingSection">
+                <div class="progress-container">
+                    <div class="progress-bar-wrapper">
+                        <div class="progress-bar" id="progressBar">
+                            <div class="progress-fill" id="progressFill"></div>
+                        </div>
+                        <span class="progress-text" id="progressText">0%</span>
+                    </div>
+                    <p class="processing-status" id="processingStatus">Loading model...</p>
+                </div>
+            </div>
+
+            <!-- Results Section -->
+            <div class="results-section hidden" id="resultsSection">
+                <div class="images-container">
+                    <div class="image-card">
+                        <div class="image-label">Original</div>
+                        <div class="image-wrapper" id="originalImageWrapper">
+                            <canvas id="originalCanvas"></canvas>
+                        </div>
+                        <div class="image-info" id="originalInfo"></div>
+                    </div>
+                    <div class="image-card">
+                        <div class="image-label">Enhanced (3x)</div>
+                        <div class="image-wrapper" id="enhancedImageWrapper">
+                            <canvas id="enhancedCanvas"></canvas>
+                        </div>
+                        <div class="image-info" id="enhancedInfo"></div>
+                    </div>
+                </div>
+                <div class="action-buttons">
+                    <button class="btn btn-primary" id="downloadBtn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        Download Enhanced Image
+                    </button>
+                    <button class="btn btn-secondary" id="newImageBtn">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="12" y1="5" x2="12" y2="19"/>
+                            <line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                        New Image
+                    </button>
+                </div>
+            </div>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>Powered by XLSR 3x • ONNX Runtime Web • 100% Client-Side AI</p>
+        </footer>
     </div>
+
+    <!-- Debug Popup -->
+    <div class="debug-popup hidden" id="debugPopup">
+        <div class="debug-header">
+            <span>🔍 Debug Information</span>
+            <button id="closeDebug" class="debug-close" aria-label="Close debug">×</button>
+        </div>
+        <div class="debug-content" id="debugContent"></div>
+    </div>
+
+    <!-- Load ONNX Runtime Web -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js"></script>
     <script src="script.js"></script>
 </body>
 </html>
