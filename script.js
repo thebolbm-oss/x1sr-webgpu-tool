@@ -1,11 +1,11 @@
 /**
- * AI Image Upscaler - XLSR 3x
+ * AI Image Upscaler - XLSR 4x
  *
  * Fixes applied vs original:
  * 1. Actually tries WebGPU execution provider first, falls back to WASM
  *    (original only ever used 'wasm', despite the UI promising WebGPU).
  * 2. Preserves aspect ratio: instead of stretching every image into a
- *    384x384 square (which baked black letterbox bars into the output),
+ *    512x512 square (which baked black letterbox bars into the output),
  *    we track the exact scale/offset used during preprocessing and crop
  *    the corresponding region back out of the model output.
  */
@@ -13,9 +13,10 @@
 (function () {
     'use strict';
 
-    // XLSR fixed I/O size (Qualcomm AI Hub 3x model): 128x128 in, 384x384 out.
+    // XLSR I/O size, per this model's own metadata.json: input [1,3,128,128],
+    // output [1,3,512,512] -- that makes it a 4x model, not 3x.
     const MODEL_INPUT_SIZE = 128;
-    const MODEL_OUTPUT_SIZE = 384; // 128 * 3
+    const MODEL_OUTPUT_SIZE = 512; // 128 * 4
     const SCALE_FACTOR = MODEL_OUTPUT_SIZE / MODEL_INPUT_SIZE;
 
     const uploadArea = document.getElementById('uploadArea');
@@ -94,6 +95,17 @@
         uploadArea.classList.toggle('not-ready', !ready);
     }
 
+    // This model ships as xlsr.onnx + xlsr.data (external weights) -- it is
+    // NOT a true single-file model, despite being called "flat". Without
+    // telling the runtime where xlsr.data lives, loading fails with a
+    // cryptic error (e.g. "Lt[m] is not a function") because it can't
+    // resolve the referenced external tensor file.
+    const EXTERNAL_DATA_OPTION = {
+        externalData: [
+            { path: 'xlsr.data', data: 'static/xlsr.data' }
+        ]
+    };
+
     // Try WebGPU first (desktop, supported browsers), fall back to WASM.
     // This is what actually delivers on the "WebGPU" promise in the UI.
     async function createSession(sourceOrBuffer) {
@@ -103,7 +115,8 @@
             try {
                 const session = await ort.InferenceSession.create(sourceOrBuffer, {
                     executionProviders: ['webgpu'],
-                    graphOptimizationLevel: 'all'
+                    graphOptimizationLevel: 'all',
+                    ...EXTERNAL_DATA_OPTION
                 });
                 activeProvider = 'webgpu';
                 return session;
@@ -114,7 +127,8 @@
 
         const session = await ort.InferenceSession.create(sourceOrBuffer, {
             executionProviders: ['wasm'],
-            graphOptimizationLevel: 'all'
+            graphOptimizationLevel: 'all',
+            ...EXTERNAL_DATA_OPTION
         });
         activeProvider = 'wasm';
         return session;
@@ -172,10 +186,10 @@
                     'MODEL ERROR\n\n' +
                     'Error: ' + err2.message + '\n\n' +
                     'FIX:\n' +
-                    '1. Make sure static/xlsr.onnx exists in the repo\n' +
-                    '2. Use the FLAT (float32) model, not the quantized/split one\n' +
-                    '3. Download from Qualcomm AI Hub\n' +
-                    '4. If serving locally, use a real HTTP server (not file://)'
+                    '1. Make sure BOTH static/xlsr.onnx AND static/xlsr.data exist\n' +
+                    '   (this model has external weights, it is not truly single-file)\n' +
+                    '2. Check metadata.json for the exact filenames/paths expected\n' +
+                    '3. If serving locally, use a real HTTP server (not file://)'
                 );
                 throw err2;
             }
@@ -244,7 +258,7 @@
     /**
      * Render the raw model output, then crop out the (scaled) letterbox
      * padding so the final image matches the original aspect ratio
-     * instead of always being a distorted 384x384 square.
+     * instead of always being a distorted 512x512 square.
      */
     function postprocess(outputData, crop) {
         const size = MODEL_OUTPUT_SIZE;
@@ -316,7 +330,7 @@
             enhancedCanvas.width = resultCanvas.width;
             enhancedCanvas.height = resultCanvas.height;
             enhancedCanvas.getContext('2d').drawImage(resultCanvas, 0, 0);
-            enhancedInfo.textContent = `Enhanced: ${resultCanvas.width}\u00d7${resultCanvas.height}px (3\u00d7, ${activeProvider})`;
+            enhancedInfo.textContent = `Enhanced: ${resultCanvas.width}\u00d7${resultCanvas.height}px (${SCALE_FACTOR}\u00d7, ${activeProvider})`;
 
             updateProgress(100, 'Done!');
 
@@ -366,7 +380,7 @@
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'enhanced-3x.png';
+            a.download = 'enhanced-4x.png';
             a.click();
             URL.revokeObjectURL(url);
         });
